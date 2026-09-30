@@ -72,9 +72,15 @@ maxfiy qiymatlar faqat Render'da turadi.
 | `POST_MAX_CHARS` | `950` | Post uzunligi (1024 gacha rasm tagiga sig'adi) |
 | `MAX_REGENERATIONS` | `5` | Bitta slotda almashtirish limiti |
 | `TOPICS` | — | `Mavzu 1;Mavzu 2` — berilsa `topics.txt` o'rniga |
+| `DESIGN_STYLES` | `neon,editorial,photo` | Rasm uslublari (navbat bilan). Masalan faqat `neon,photo` |
 
 Mavzularni o'zgartirish: `topics.txt` ni tahrirlang → GitHub'ga push → Render avtomatik qayta deploy qiladi.
 Yozish uslubi `prompts.py` da (kanal postlaringiz asosida tuzilgan).
+
+### Rasm dizayni
+Gemini faqat matnsiz fon rasmini chizadi, sarlavha va boshqa yozuvlarni `design.py` shriftlar bilan qo'yadi — shuning uchun o'zbekcha harflar doim xatosiz.
+Uch uslub navbat bilan almashadi: **Neon** (qora fon, neon 3D), **Editorial** (och iliq fon, 3 qadam, CTA), **Foto + karta** (real foto, oq kartada sarlavha).
+Shriftlar `fonts/` papkasida (SIL Open Font License).
 
 ## 6. Xavfsizlik
 

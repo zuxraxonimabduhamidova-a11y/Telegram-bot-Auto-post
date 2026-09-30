@@ -65,7 +65,8 @@ from telegram.ext import (
     Defaults,
 )
 
-from prompts import IMAGE_STYLE, build_post_prompt
+import design as D
+from prompts import build_image_prompt, build_post_prompt
 
 BASE_DIR = Path(__file__).resolve().parent
 log = logging.getLogger("smmbot")
@@ -133,6 +134,7 @@ class Config:
     public_url: Optional[str]
     keep_alive: bool
     topics: tuple
+    design_styles: tuple = D.STYLES
 
 
 def _parse_times(raw: str) -> tuple:
@@ -206,6 +208,8 @@ def load_config() -> Config:
         public_url=(os.getenv("RENDER_EXTERNAL_URL") or os.getenv("PUBLIC_URL") or "").strip() or None,
         keep_alive=os.getenv("KEEP_ALIVE", "1").strip() not in ("0", "false", "no"),
         topics=_load_topics(),
+        design_styles=tuple(x for x in re.split(r"[,\s;]+", os.getenv("DESIGN_STYLES", ",".join(D.STYLES)).lower())
+                            if x in D.STYLES) or D.STYLES,
     )
 
 
@@ -297,6 +301,7 @@ class Draft:
     slot_key: str
     label: str
     topic: str
+    style: str = ""
     status: str = "generating"
     text: str = ""
     hook: str = ""
@@ -316,7 +321,7 @@ class Draft:
     def save_image(self, data: Optional[bytes], folder: Path) -> None:
         self.remove_image()
         if data:
-            p = folder / f"{self.id}-{self.regen_count}.png"
+            p = folder / f"{self.id}-{self.regen_count}.jpg"
             p.write_bytes(data)
             self.image_path = str(p)
 
@@ -362,10 +367,23 @@ class Store:
 
 
 # ════════════════════════════ GEMINI ════════════════════════════
+class DesignOut(BaseModel):
+    headline: str
+    highlight: str = ""
+    tag: str = ""
+    subline: str = ""
+    points: list[str] = []
+    cta_bold: str = ""
+    cta_rest: str = ""
+    note: str = ""
+    accent: str = ""
+    scene: str = ""
+
+
 class PostOut(BaseModel):
     hook: str
     post: str
-    image_prompt: str
+    design: DesignOut
 
 
 class ContentEngine:
@@ -407,22 +425,23 @@ class ContentEngine:
         raw = re.sub(r"^```(?:json)?|```$", "", raw, flags=re.M).strip()
         return PostOut.model_validate_json(raw)
 
-    async def write_post(self, topic: str, recent: list[str]) -> tuple[str, str, str]:
+    async def write_post(self, topic: str, recent: list[str], style: str) -> tuple[str, str, DesignOut]:
         sig_len = tg_len(self.cfg.channel_signature) + 2
         limit = self.cfg.post_max_chars
-        prompt = build_post_prompt(topic, recent, limit)
+        prompt = build_post_prompt(topic, recent, limit, style)
         conf = gtypes.GenerateContentConfig(
             temperature=0.95,
             response_mime_type="application/json",
             response_schema=PostOut,
         )
-        text = hook = img = ""
+        text = hook = ""
+        design = None
         for attempt in range(3):
             resp = await self._call(
                 "Matn", lambda: self.client.aio.models.generate_content(
                     model=self.cfg.text_model, contents=prompt, config=conf))
             out = self._parse(resp)
-            text, hook, img = self._clean(out.post), out.hook.strip(), out.image_prompt.strip()
+            text, hook, design = self._clean(out.post), out.hook.strip(), out.design
             if not text:
                 continue
             if tg_len(strip_md(text)) + sig_len <= 1024:
@@ -431,14 +450,17 @@ class ContentEngine:
                        f"Qisqaroq yoz, {limit - 100} belgidan oshirma!")
         if not text:
             raise RuntimeError("Model bo'sh matn qaytardi")
-        return text, img or topic, hook or strip_md(text.split("\n", 1)[0])
+        hook = hook or strip_md(text.split("\n", 1)[0])
+        if design is None or not design.headline.strip():
+            design = DesignOut(headline=hook[:60], scene=topic)
+        return text, hook, design
 
-    async def draw(self, scene: str) -> bytes:
+    async def draw(self, scene: str, style: str, accent: str) -> bytes:
         kw = {"response_modalities": ["TEXT", "IMAGE"]}
         if hasattr(gtypes, "ImageConfig"):
-            kw["image_config"] = gtypes.ImageConfig(aspect_ratio="4:3")
+            kw["image_config"] = gtypes.ImageConfig(aspect_ratio=D.ASPECT.get(style, "1:1"))
         conf = gtypes.GenerateContentConfig(**kw)
-        prompt = IMAGE_STYLE.format(scene=scene)
+        prompt = build_image_prompt(style, scene, accent)
 
         async def go() -> bytes:
             r = await self.client.aio.models.generate_content(
@@ -545,6 +567,12 @@ class PostManager:
         self.store.data["topic_idx"] = i + 1
         return topics[i]
 
+    def next_style(self) -> str:
+        styles = self.cfg.design_styles
+        i = int(self.store.data.get("style_idx", 0)) % len(styles)
+        self.store.data["style_idx"] = i + 1
+        return styles[i]
+
     async def notify(self, text: str, **kw) -> None:
         for aid in self.cfg.admin_ids:
             try:
@@ -623,12 +651,12 @@ class PostManager:
         except Exception:
             log.exception("Taymer xatosi")
 
-    async def _build(self, topic: str, sp: Spinner) -> tuple[str, str, Optional[bytes], Optional[str]]:
+    async def _build(self, topic: str, style: str, sp: Spinner) -> tuple[str, str, Optional[bytes], Optional[str]]:
         last: Optional[Exception] = None
         for attempt in range(2):
             try:
                 sp.stage = "✍️ Matn yozilmoqda…" if attempt == 0 else "🔁 Qayta urinilmoqda: matn…"
-                text, scene, hook = await self.engine.write_post(topic, self.store.data.get("hooks", []))
+                text, hook, design = await self.engine.write_post(topic, self.store.data.get("hooks", []), style)
                 break
             except asyncio.CancelledError:
                 raise
@@ -640,15 +668,24 @@ class PostManager:
         else:
             raise last or RuntimeError("Matn yaratilmadi")
 
-        sp.stage = "🎨 Rasm chizilmoqda…"
-        img, err = None, None
+        spec = D.spec_from(design.model_dump(), hook)
+        accent = spec.accent if spec.accent in D.STYLE_ACCENTS.get(style, []) else D.STYLE_ACCENTS[style][0]
+        sp.stage = f"🎨 Fon rasmi chizilmoqda ({D.STYLE_NAMES.get(style, style)})…"
+        bg, err = None, None
         try:
-            img = await self.engine.draw(scene)
+            bg = await self.engine.draw(design.scene or topic, style, accent)
         except asyncio.CancelledError:
             raise
         except Exception as e:
             err = short_err(e)
-            log.warning("Rasm yaratilmadi: %s", err)
+            log.warning("Fon rasmi yaratilmadi, shablon fon ishlatiladi: %s", err)
+
+        sp.stage = "🖌 Dizayn yig'ilmoqda…"
+        try:
+            img = await asyncio.to_thread(D.render, style, spec, bg, self.cfg.channel_signature)
+        except Exception as e:
+            log.exception("Dizayn yig'ilmadi")
+            img, err = bg, (err or "") + f" | dizayn: {short_err(e)}"
         sp.stage = "📦 Yakunlanmoqda…"
         return text, hook, img, err
 
@@ -659,9 +696,12 @@ class PostManager:
         mins = max(1, math.ceil((d.deadline - time.time()) / 60))
         header = (f"📝 <b>Yangi post tayyor</b> — {esc(d.label)}\n"
                   f"🏷 Mavzu: {esc(d.topic)}\n"
+                  f"🎨 Uslub: {esc(D.STYLE_NAMES.get(d.style, d.style or '—'))}\n"
                   f"🔄 Almashtirish: {d.regen_count}/{self.cfg.max_regens}\n")
         if not img:
             header += f"⚠️ Rasm yaratilmadi ({esc(d.image_error or 'nomaʼlum')}). Post rasmsiz chiqadi.\n"
+        elif d.image_error:
+            header += f"ℹ️ AI fon chiqmadi, shablon fon ishlatildi ({esc(d.image_error[:120])}).\n"
         header += (f"\n⏱ {mins} daqiqa ichida javob bo'lmasa — avtomatik kanalga chiqadi."
                    if d.auto else "\n⏸ Bu post uchun avtomatik chiqish o'chirilgan.")
 
@@ -694,7 +734,8 @@ class PostManager:
                 return
             else:
                 self.store.mark(slot_key)
-                d = Draft(id=secrets.token_hex(6), slot_key=slot_key, label=label, topic=self.next_topic())
+                d = Draft(id=secrets.token_hex(6), slot_key=slot_key, label=label,
+                          topic=self.next_topic(), style=self.next_style())
                 self.draft = d
                 self._persist()
         if busy:
@@ -704,7 +745,7 @@ class PostManager:
         log.info("Post tayyorlanmoqda: %s | %s", label, d.topic)
         try:
             async with Spinner(self.bot, self.cfg.admin_ids, f"Post tayyorlanmoqda — {label}") as sp:
-                text, hook, img, err = await self._build(d.topic, sp)
+                text, hook, img, err = await self._build(d.topic, d.style, sp)
         except Exception as e:
             log.exception("Post yaratilmadi")
             async with self.lock:
@@ -785,8 +826,8 @@ class PostManager:
         log.info("Almashtirish so'raldi (%s)", by)
         try:
             async with Spinner(self.bot, self.cfg.admin_ids, "Yangi variant tayyorlanmoqda") as sp:
-                topic = self.next_topic()
-                text, hook, img, err = await self._build(topic, sp)
+                topic, style = self.next_topic(), self.next_style()
+                text, hook, img, err = await self._build(topic, style, sp)
         except Exception as e:
             log.exception("Yangi variant yaratilmadi")
             async with self.lock:
@@ -800,7 +841,7 @@ class PostManager:
 
         await self._delete_admin_msgs(d)
         d.regen_count += 1
-        d.topic, d.text, d.hook, d.image_error = topic, text, hook, err
+        d.topic, d.style, d.text, d.hook, d.image_error = topic, style, text, hook, err
         d.save_image(img, self.cfg.data_dir)
         await self._present(d)
         if len(self.cfg.admin_ids) > 1:
