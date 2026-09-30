@@ -1115,8 +1115,34 @@ async def main() -> None:
         await runner.cleanup()
 
 
+def load_env_file(path: Path = BASE_DIR / ".env") -> bool:
+    """Kompyuterda sinash uchun .env faylini o'qiydi (Render'da bu fayl bo'lmaydi).
+    .env dagi qiymatlar terminalda oldin yozilgan qiymatlardan ustun turadi."""
+    if not path.exists():
+        return False
+    for raw in path.read_text(encoding="utf-8-sig").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, val = line.split("=", 1)
+        key = key.strip().removeprefix("export ").strip()
+        val = val.strip()
+        q = re.match(r"""^(["'])(.*?)\1\s*(#.*)?$""", val)
+        if q:  # "qiymat"   # izoh  →  qiymat
+            val = q.group(2)
+        else:
+            val = re.split(r"\s+#", val, maxsplit=1)[0].strip()  # qator oxiridagi izohni olib tashlash
+            val = val.strip("\"'")
+        if re.fullmatch(r"[A-Z_][A-Z0-9_]*", key) and val:
+            os.environ[key] = val
+    return True
+
+
 def run() -> None:
+    loaded = load_env_file()
     setup_logging()
+    if loaded:
+        log.info(".env fayldan sozlamalar o'qildi")
     backoff = 5
     while True:
         try:
