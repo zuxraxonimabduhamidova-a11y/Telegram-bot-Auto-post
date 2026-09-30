@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: smm-post-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      # --- MAXFIY: qiymatlarni Render panelida kiriting (sync: false = repoga yozilmaydi) ---
+      - key: BOT_TOKEN
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: ADMIN_IDS
+        sync: false
+      # --- Oddiy sozlamalar ---
+      - key: CHANNEL_ID
+        value: "@marketingsotuv"
+      - key: POST_TIMES
+        value: "09:00,19:00"
+      - key: TIMEZONE
+        value: Asia/Tashkent
+      - key: APPROVAL_MINUTES
+        value: "15"
+      - key: GEMINI_TEXT_MODEL
+        value: gemini-3.8-flash
+      - key: GEMINI_IMAGE_MODEL
+        value: gemini-3.1-flash-image

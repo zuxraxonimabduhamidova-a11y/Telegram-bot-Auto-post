@@ -1,0 +1,5 @@
+python-telegram-bot[job-queue]>=21.6,<23
+google-genai>=1.40
+aiohttp>=3.9
+pydantic>=2.6
+tzdata>=2024.1
